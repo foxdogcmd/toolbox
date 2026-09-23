@@ -1,0 +1,17 @@
+# 统一换行：仓库里存 LF，避免 Windows / macOS 来回改
+* text=auto
+
+# Windows 批处理必须 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Unix 脚本必须 LF，否则 Linux / macOS 上 ./gradlew 直接报错
+gradlew text eol=lf
+*.sh text eol=lf
+
+# 二进制：不做换行转换
+*.jar binary
+*.png binary
+*.webp binary
+*.jpg binary
+*.ico binary

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:theme="@style/Theme.Toolbox">
+        <activity
+            android:name=".LoginActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:exported="false" />
+        <activity
+            android:name=".tools.grades.GradesActivity"
+            android:label="成绩查询"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".tools.schedule.ScheduleActivity"
+            android:label="我的课表"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".tools.calendar.CalendarActivity"
+            android:label="校历"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".tools.leave.LeaveActivity"
+            android:label="学生请假"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".tools.ykt.YktActivity"
+            android:label="虚拟校园卡" />
+        <activity
+            android:name=".tools.emptyroom.EmptyRoomActivity"
+            android:label="空教室"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".tools.jyjs.BorrowActivity"
+            android:label="教室借用"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".tools.huping.HupingActivity"
+            android:label="班级互评"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".tools.webvpn.WebVpnActivity"
+            android:label="校内网站"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".SettingsActivity"
+            android:label="设置"
+            android:windowSoftInputMode="adjustResize" />
+    </application>
+
+</manifest>

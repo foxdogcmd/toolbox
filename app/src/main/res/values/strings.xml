@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <string name="app_name">PPSUC工具箱</string>
+
+    <!-- 「数据都在本机」说明：开屏登录页与主界面「关于」都用这一段 -->
+    <string name="local_data_title">数据都在本机</string>
+    <string name="local_data_text">· 学号、密码、课表、成绩、教室、互评分数等数据全部只保存在本机，不上传任何第三方服务器。\n· 密码用 Android Keystore 加密后落盘（密钥不出本机安全模块）；不勾选「记住密码」则密码不写盘。\n· 应用只与学校域名（webvpn.ppsuc.edu.cn 等）通信。\n· 卸载应用，或在「设置」里清除凭据，即可删除本机全部数据。</string>
+
+    <!-- 免责声明 -->
+    <string name="disclaimer_title">免责声明</string>
+    <string name="disclaimer_text">· 本应用为个人自用的非官方工具，非学校发布，与学校及任何校内部门无隶属关系。\n· 仅供本人账号使用，禁止用于他人账号或任何商业用途。\n· 应用通过学校 WebVPN 直接访问校内系统，不绕过、不修改学校系统的权限与校验。\n· 由使用本应用产生的一切后果（包括误操作导致的评分、请假、教室借用等数据变更）由使用者自行承担。\n· 自行承担账号安全责任，请勿把本机借给他人使用。\n· 与学校官方渠道信息不一致时，一律以学校官方系统为准。</string>
+
+    <!-- 登录页密码冻结提醒 -->
+    <string name="freeze_warning">注意：统一身份认证密码连续输错 10 次，账号会被暂时冻结（锁定）。忘记密码请不要反复试，改用学校统一身份认证的找回密码渠道。</string>
+
+</resources>
