@@ -34,7 +34,11 @@
             android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".tools.leave.LeaveActivity"
-            android:label="学生请假"
+            android:label="请假系统（原生）"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".tools.leave.LeaveVueActivity"
+            android:label="请假系统（Vue）"
             android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".tools.ykt.YktActivity"

@@ -2,6 +2,9 @@
 // 移植自 go/client.go，逻辑保持一致；拆分为 登录 / 列表 / 明细 三步以支持增量刷新
 package com.foxxd.toolbox.tools.grades
 
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
@@ -600,6 +603,110 @@ class GradeClient(
         val (finalURL, _) = get(url("/xsfw/sys/swmxsqjapp/*default/index.do"))
         if (finalURL.contains("authserver/login")) {
             throw RuntimeException("单点登录学工系统失败")
+        }
+    }
+
+    /** 原生请假页的会话：进入应用后必须切换到当前学生角色。 */
+    fun loginLeaveApi(username: String, password: String) {
+        casLogin(username, password, "$vpnBase/login?cas_login=true", "WebVPN")
+        val (finalURL, _) = get(url("/xsfw/sys/swmxsqjapp/*default/index.do"))
+        if (finalURL.contains("authserver/login")) throw IOException("单点登录学工系统失败")
+        val role = appRoleId("5027685304497491", "swmxsqjapp")
+        if (role.isEmpty()) throw IOException("无法获取请假应用角色")
+        val (_, body) = get(url("/xsfw/sys/funauthapp/api/changeAppRole/swmxsqjapp/$role.do"))
+        if (!JSONObject(body).optBoolean("success")) throw IOException("切换请假应用角色失败")
+    }
+
+    /** 学生请假接口，沿用当前进程的 WebVPN Cookie 会话。 */
+    fun leavePost(controller: String, action: String, params: JSONObject = JSONObject()): JSONObject {
+        val path = "/xsfw/sys/swmxsqjapp/$controller/$action.do"
+        val (_, body) = http(
+            "POST", url(path), mapOf("data" to params.toString()),
+            mapOf(
+                "X-Requested-With" to "XMLHttpRequest",
+                "Referer" to url("/xsfw/sys/swmxsqjapp/*default/index.do"),
+            ),
+        )
+        val result = try { JSONObject(body) } catch (_: Exception) {
+            throw IOException("请假接口未返回 JSON，会话可能已失效")
+        }
+        if (result.optString("code") != "0") {
+            throw IOException(result.optString("msg").ifEmpty { "请假接口返回错误：${result.optString("code")}" })
+        }
+        return result
+    }
+
+    /** 地区码表，供设置页保存的地点路径转换为提交所需代码。 */
+    fun leaveRegions(): JSONObject {
+        val (_, body) = http(
+            "GET", url("/xsfw/code/80f9d8aa-d053-4312-b725-016642b74e3e.do"),
+            headers = mapOf(
+                "X-Requested-With" to "XMLHttpRequest",
+                "Referer" to url("/xsfw/sys/swmxsqjapp/*default/index.do"),
+            ),
+        )
+        return JSONObject(body)
+    }
+
+    /** 学校 xg-uploader 的 multipart 契约；多个图片共用 fileToken。 */
+    fun leaveUploadImage(context: Context, uri: Uri, token: String) {
+        val resolver = context.contentResolver
+        val mime = resolver.getType(uri).orEmpty()
+        if (!mime.startsWith("image/")) throw IOException("请选择图片文件")
+        val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }?.replace(Regex("[\\r\\n\"\\\\/]"), "_") ?: "image.jpg"
+        val size = resolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+        if (size < 0 || size > 10L * 1024 * 1024) {
+            throw IOException("图片大小无法确认或超过 10 MB")
+        }
+        val boundary = "TbUpload${System.currentTimeMillis()}"
+        val fields = linkedMapOf(
+            "storeId" to "image", "isImage" to "1", "fileToken" to token,
+            "fjzd" to "ZMCL", "appName" to "swmxsqjapp",
+            "authBean" to "xsqjFileOpAuthManager", "authApp" to "xsqjapp",
+            "tableName" to "T_XG_QXJ_XSSQ", "fileName" to name,
+        )
+        val prefix = buildString {
+            for ((key, value) in fields) {
+                append("--$boundary\r\nContent-Disposition: form-data; name=\"$key\"\r\n\r\n")
+                append(value).append("\r\n")
+            }
+            append("--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"$name\"\r\n")
+            append("Content-Type: $mime\r\n\r\n")
+        }.toByteArray(Charsets.UTF_8)
+        val suffix = "\r\n--$boundary--\r\n".toByteArray(Charsets.UTF_8)
+        val conn = URL(url("/xsfw/sys/uploadcomponent/upload/uploadFile.do"))
+            .openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = "POST"
+            conn.doOutput = true
+            conn.connectTimeout = TIMEOUT
+            conn.readTimeout = TIMEOUT
+            conn.setRequestProperty("User-Agent", UA)
+            conn.setRequestProperty("X-Requested-With", "XMLHttpRequest")
+            conn.setRequestProperty("Referer", url("/xsfw/sys/swmxsqjapp/*default/index.do"))
+            conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            conn.setFixedLengthStreamingMode(prefix.size.toLong() + size + suffix.size)
+            conn.outputStream.use { output ->
+                output.write(prefix)
+                resolver.openInputStream(uri)?.use { input -> input.copyTo(output) }
+                    ?: throw IOException("无法读取所选图片")
+                output.write(suffix)
+            }
+            val body = (if (conn.responseCode < 400) conn.inputStream else conn.errorStream)
+                ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            if (conn.responseCode >= 400) throw IOException("图片上传失败：HTTP ${conn.responseCode}")
+            val result = try { JSONObject(body) } catch (_: Exception) {
+                throw IOException("图片上传接口未返回 JSON")
+            }
+            if (result.optString("code") != "0" ||
+                result.optJSONObject("data")?.optString("id").isNullOrEmpty()) {
+                throw IOException(result.optString("msg").ifEmpty { "图片上传失败" })
+            }
+        } finally {
+            conn.disconnect()
         }
     }
 
