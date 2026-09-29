@@ -145,7 +145,7 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="请假快速填充"
+                        android:text="请假常用信息"
                         android:textColor="#212121"
                         android:textSize="16sp"
                         android:textStyle="bold" />
@@ -169,7 +169,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
-                    android:text="与请假表单一一对应，维护一次后每次一键填充。学号、姓名等自动加载项和请假天数、证明材料无需管理。"
+                    android:text="保存后，原生请假会自动带入常用信息；原版 Vue 页面可点“快速填充”。类型默认“私事”，时间每次单独选择。学号、姓名由学校接口读取。"
                     android:textColor="#757575"
                     android:textSize="12sp" />
 
@@ -241,6 +241,41 @@
 
                     <EditText
                         android:id="@+id/fLXDH"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1.2"
+                        android:background="@null"
+                        android:hint="未填写"
+                        android:inputType="phone"
+                        android:textAlignment="viewEnd"
+                        android:textColor="#212121"
+                        android:textSize="14sp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:minHeight="48dp"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="*"
+                        android:textColor="#E53935"
+                        android:textSize="14sp" />
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="本人手机号"
+                        android:textColor="#212121"
+                        android:textSize="14sp" />
+
+                    <EditText
+                        android:id="@+id/fSJH"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1.2"
@@ -417,34 +452,6 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="是否离校假"
-                        android:textColor="#212121"
-                        android:textSize="14sp" />
-
-                    <com.google.android.material.switchmaterial.SwitchMaterial
-                        android:id="@+id/swSFLX"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:minHeight="48dp"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="*"
-                        android:textColor="#E53935"
-                        android:textSize="14sp" />
-
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
                         android:text="是否离京"
                         android:textColor="#212121"
                         android:textSize="14sp" />
@@ -501,40 +508,6 @@
 
                     <TextView
                         android:id="@+id/fQJXZ"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1.2"
-                        android:background="@null"
-                        android:hint="请选择 ›"
-                        android:textAlignment="viewEnd"
-                        android:textColor="#212121"
-                        android:textSize="14sp" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:minHeight="48dp"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="*"
-                        android:textColor="#E53935"
-                        android:textSize="14sp" />
-
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="请假类型"
-                        android:textColor="#212121"
-                        android:textSize="14sp" />
-
-                    <TextView
-                        android:id="@+id/fQJLX"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1.2"

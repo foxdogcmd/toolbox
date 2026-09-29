@@ -1,4 +1,4 @@
-// QuickFillStore.kt — 请假表单的快速填充数据（原生侧保存，可在设置页管理）
+// QuickFillStore.kt — 请假表单的常用信息（兼容旧版快速填充存档）
 package com.foxxd.toolbox.tools.leave
 
 import android.content.Context

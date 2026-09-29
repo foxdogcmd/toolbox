@@ -1,505 +1,602 @@
 package com.foxxd.toolbox.tools.leave
 
-import android.annotation.SuppressLint
+import android.app.DatePickerDialog
+import android.app.TimePickerDialog
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.view.View
-import android.webkit.JavascriptInterface
-import android.webkit.ValueCallback
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.foxxd.toolbox.R
+import com.foxxd.toolbox.SettingsActivity
 import com.foxxd.toolbox.tools.AuthUi
 import com.foxxd.toolbox.tools.grades.GradeClient
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.card.MaterialCardView
+import com.google.android.material.switchmaterial.SwitchMaterial
+import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayInputStream
-import java.net.CookieHandler
-import java.net.CookieManager
-import java.net.HttpURLConnection
-import java.net.URL
+import java.math.BigDecimal
+import java.math.RoundingMode
+import java.security.SecureRandom
+import java.time.Duration
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+import java.util.Calendar
 
-/**
- * 学生请假：后台完成 CAS 认证后，把会话 Cookie 同步进 WebView，
- * 直接打开学校手机版请假页面（含请假申请功能），不做原生列表。
- * 注入 JS：承诺书自动勾选 + 弹窗提速；「快速填充」把设置页维护的值写回表单
- * （选择类字段通过真实 UI 回放选中，保证内部代码正确）。
- */
+/** 不加载学校 SPA 的学生请假页面。所有业务请求仍通过学校 WebVPN 和本人 CAS 会话。 */
 class LeaveActivity : AppCompatActivity() {
-
     private lateinit var auth: AuthUi
     private lateinit var status: TextView
-    private lateinit var web: WebView
-    private lateinit var fillBtn: MaterialButton
+    private lateinit var content: LinearLayout
+    private lateinit var scroll: ScrollView
+    private var client: GradeClient? = null
+    private var setting = JSONObject()
+    private var types = JSONArray()
+    private var photo = JSONObject()
+    private var records = JSONArray()
+    private var onForm = false
+    private var submitting = false
+    private var agreedAt = ""
+    private var selectedType = JSONObject()
+    private var startAt: LocalDateTime? = null
+    private var endAt: LocalDateTime? = null
+    private lateinit var typeButton: MaterialButton
+    private lateinit var startButton: MaterialButton
+    private lateinit var endButton: MaterialButton
+    private lateinit var reasonInput: EditText
+    private lateinit var regionButton: MaterialButton
+    private var selectedRegion = ""
+    private lateinit var addressInput: EditText
+    private lateinit var remarkInput: EditText
+    private lateinit var leaveBeijing: SwitchMaterial
+    private lateinit var overnight: SwitchMaterial
+    private lateinit var injurySection: LinearLayout
+    private lateinit var injuryCertificateButton: MaterialButton
+    private lateinit var injuryReasonInput: EditText
+    private var injuryCertificate = ""
+    private lateinit var offCampus: SwitchMaterial
+    private lateinit var submitButton: MaterialButton
+    private lateinit var imagesHint: TextView
+    private lateinit var clearImagesButton: MaterialButton
+    private val chosenImages = mutableListOf<Uri>()
+    private var missingHint: TextView? = null
+    private var settingsButton: MaterialButton? = null
 
-    @Volatile
-    private var loading = false
-
-    /**
-     * WebVPN cookie 透传请求缓存：打开日期组件时页面会瞬间发出 500+ 个
-     * /wengine-vpn/cookie?method=get 请求（仅 vpn_timestamp 不同）导致卡死，
-     * 这里按去时间戳的 URL 做短 TTL 缓存根治。
-     */
-    private val vpnCookieCache = HashMap<String, Pair<Long, ByteArray>>()
-
-    /** WebView 文件选择（证明材料）回调 */
-    private var fileCallback: ValueCallback<Array<Uri>>? = null
-    private val filePicker =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            val cb = fileCallback
-            fileCallback = null
-            cb?.onReceiveValue(
-                WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
-            )
+    private val timeFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+    private val imagePicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        val accepted = uris.filter { contentResolver.getType(it)?.startsWith("image/") == true }.take(3)
+        if (accepted.size != uris.size) {
+            Toast.makeText(this, "仅支持最多 3 张图片", Toast.LENGTH_SHORT).show()
         }
-
-    /** JS → 原生桥：上报当前是否在表单页（控制快速填充按钮显隐） */
-    class QuickFillJs(
-        private val activity: AppCompatActivity,
-        private val onFormPage: (Boolean) -> Unit,
-    ) {
-        @JavascriptInterface
-        fun setFormPage(visible: Boolean) {
-            activity.runOnUiThread { onFormPage(visible) }
-        }
+        chosenImages.clear()
+        chosenImages.addAll(accepted)
+        if (::imagesHint.isInitialized) updateImages()
     }
 
-    @SuppressLint("SetJavaScriptEnabled", "AddJavascriptInterface")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_leave)
-
         status = findViewById(R.id.status)
-        web = findViewById(R.id.web)
-        fillBtn = findViewById(R.id.fillBtn)
-        web.settings.javaScriptEnabled = true
-        web.settings.domStorageEnabled = true
-        web.settings.useWideViewPort = true
-        web.settings.loadWithOverviewMode = true
-        web.addJavascriptInterface(QuickFillJs(this) { onForm ->
-            // 「快速填充」只在新增请假表单页显示，避免挡住列表页的新增按钮
-            fillBtn.visibility = if (onForm) View.VISIBLE else View.GONE
-        }, "TbQuickFill")
-        web.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                status.visibility = View.GONE
-                view?.evaluateJavascript(INJECT_JS, null)
-            }
-
-            /**
-             * WebVPN 的 JS 会把每次 document.cookie 读取变成一个
-             * /wengine-vpn/cookie 网络请求，日期选择器等 DOM 密集型弹窗
-             * 一次触发 500+ 个相同请求导致页面假死。这里缓存响应根治。
-             */
-            override fun shouldInterceptRequest(
-                view: WebView?,
-                request: WebResourceRequest?,
-            ): WebResourceResponse? {
-                val url = request?.url?.toString() ?: return null
-                if (!url.contains("/wengine-vpn/cookie")) return null
-                if (!url.contains("method=get")) {
-                    // 写 cookie 的请求放行，并清掉缓存避免脏数据
-                    synchronized(vpnCookieCache) { vpnCookieCache.clear() }
-                    return null
-                }
-                val key = url.replace(Regex("&vpn_timestamp=\\d+"), "")
-                synchronized(vpnCookieCache) {
-                    vpnCookieCache[key]?.let { (ts, body) ->
-                        if (System.currentTimeMillis() - ts < VPN_COOKIE_TTL) {
-                            return WebResourceResponse(
-                                "text/plain", "utf-8", ByteArrayInputStream(body)
-                            )
-                        }
-                    }
-                }
-                return try {
-                    val conn = URL(url).openConnection() as HttpURLConnection
-                    conn.connectTimeout = 10_000
-                    conn.readTimeout = 10_000
-                    android.webkit.CookieManager.getInstance().getCookie(url)?.let {
-                        conn.setRequestProperty("Cookie", it)
-                    }
-                    val body = conn.inputStream.readBytes()
-                    conn.disconnect()
-                    synchronized(vpnCookieCache) {
-                        vpnCookieCache[key] = System.currentTimeMillis() to body
-                    }
-                    WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(body))
-                } catch (e: Exception) {
-                    null
-                }
-            }
-        }
-        web.webChromeClient = object : WebChromeClient() {
-            override fun onShowFileChooser(
-                view: WebView?,
-                callback: ValueCallback<Array<Uri>>?,
-                params: FileChooserParams?,
-            ): Boolean {
-                fileCallback?.onReceiveValue(null)
-                fileCallback = callback
-                return try {
-                    val intent = params?.createIntent()
-                        ?: Intent(Intent.ACTION_GET_CONTENT).apply { type = "*/*" }
-                    filePicker.launch(intent)
-                    true
-                } catch (e: Exception) {
-                    fileCallback = null
-                    false
-                }
-            }
-        }
-
-        fillBtn.setOnClickListener { quickFill() }
-
+        content = findViewById(R.id.leaveContent)
+        scroll = findViewById(R.id.leaveScroll)
         auth = AuthUi(this) { _, _ -> open() }
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
+            intent.getBooleanExtra("preview_leave", false)) {
+            // 无账号的模拟器可预览原生表单；发布版本不会进入此分支。
+            setting = JSONObject().put("ZDQJTS", 100)
+            types = JSONArray().put(JSONObject()
+                .put("LXMC", "私事").put("LXDM", "eb26c6135ed3411ea30ff6660927707c")
+                .put("QJSJLX", "2"))
+            auth.hide()
+            status.visibility = View.GONE
+            showForm()
+            return
+        }
         if (auth.credentials(this) != null) {
             auth.hide()
             open()
         } else {
-            status.text = "请登录后进入请假页面"
+            status.text = "请先登录，再查看和申请请假"
         }
     }
 
-    private fun quickFill() {
-        val json = QuickFillStore.load(this)
-        if (json == null) {
-            Toast.makeText(this, "暂无历史填写记录，请先提交一次请假", Toast.LENGTH_SHORT).show()
-            return
-        }
-        web.evaluateJavascript("window.__tbFill(${JSONObject.quote(json)})") { result ->
-            val ok = result?.contains("ok") == true
-            Toast.makeText(
-                this,
-                if (ok) "已填充" else "请在「新增请假」表单页使用",
-                Toast.LENGTH_SHORT,
-            ).show()
-        }
-    }
-
-    private fun setStatus(msg: String) = runOnUiThread {
+    private fun <T> request(message: String, work: (GradeClient) -> T, done: (T) -> Unit) {
+        val active = client ?: return
+        status.text = message
         status.visibility = View.VISIBLE
-        status.text = msg
-    }
-
-    private fun open() {
-        if (loading) return
-        val cred = auth.credentials(this)
-        if (cred == null) {
-            auth.show()
-            status.text = "请先登录"
-            return
-        }
-        val (xh, pwd) = cred
-        loading = true
-        setStatus("登录中…")
         Thread {
             try {
-                val client = GradeClient(GradeClient.DEFAULT_VPN_BASE, GradeClient.LEAVE_PREFIX)
-                client.loginLeaveWeb(xh, pwd)
-                syncCookies()
-                runOnUiThread { web.loadUrl(MOBILE_URL) }
+                val result = work(active)
+                runOnUiThread {
+                    status.visibility = View.GONE
+                    done(result)
+                }
             } catch (e: Exception) {
-                setStatus("[-] ${e.message}")
-                runOnUiThread { auth.show() }
-            } finally {
-                loading = false
+                runOnUiThread {
+                    status.text = e.message ?: "请求失败，请稍后重试"
+                    Toast.makeText(this, status.text, Toast.LENGTH_LONG).show()
+                    submitting = false
+                    if (onForm) submitButton.isEnabled = true
+                }
             }
         }.start()
     }
 
-    /** 把 HttpURLConnection 会话里的 Cookie 搬进 WebView，实现免登直达。 */
-    private fun syncCookies() {
-        val store = (CookieHandler.getDefault() as? CookieManager)?.cookieStore ?: return
-        val cm = android.webkit.CookieManager.getInstance()
-        cm.setAcceptCookie(true)
-        for (c in store.cookies) {
-            val host = c.domain?.removePrefix(".") ?: "webvpn.ppsuc.edu.cn"
-            val sb = StringBuilder().append(c.name).append("=").append(c.value)
-            c.path?.let { sb.append("; Path=").append(it) }
-            c.domain?.let { sb.append("; Domain=").append(it) }
-            cm.setCookie("https://$host", sb.toString())
+    private fun open() {
+        val credentials = auth.credentials(this)
+        if (credentials == null) {
+            auth.show()
+            status.text = "请先登录"
+            return
         }
-        cm.flush()
-    }
-
-    @Deprecated("WebView 内优先返回上一页")
-    override fun onBackPressed() {
-        if (web.canGoBack()) web.goBack() else super.onBackPressed()
-    }
-
-    companion object {
-        private const val MOBILE_URL = GradeClient.DEFAULT_VPN_BASE + GradeClient.LEAVE_PREFIX +
-                "/xsfw/sys/swmxsqjapp/*default/index.do#/qjsq"
-
-        /** VPN cookie 透传响应的缓存时长：flood 集中在几秒内,15s 足以根治 */
-        private const val VPN_COOKIE_TTL = 15_000L
-
-        /**
-         * 注入到请假 SPA 的增强脚本。组件一律从 Vue 根实例沿 $children 树查找
-         * （组件树很小），不做全 DOM 扫描，避免卡顿。
-         * 0. MOB_UTIL.getI18nCookie 加缓存：vant 弹窗每格渲染都调它读 cookie，
-         *    经 wengine 变成同步网络请求，一次弹窗上千个导致卡死，这是根治手段
-         *    （document.cookie 读缓存 + 原生拦截做兜底）；
-         * 1. 承诺书页(#/qjcn)：每个 tick 强制清倒计时 + 勾选 + 启用同意按钮（patch 所有匹配 vm，重进必生效）；
-         * 2. 表单页(#/xzqjsq)：上报路由给原生，控制「快速填充」悬浮按钮显隐；
-         * 3. window.__tbFill(json)：原生悬浮按钮调用。普通字段直接写 formValue；
-         *    请假性质/请假类型/所去地点通过真实 UI 回放选中（xg-select/xg-tree 有内部状态，直接 set 不生效）。
-         *    不做网页表单自动提取——会覆盖用户在设置页手动维护的数据。
-         */
-        private val INJECT_JS = """
-(function () {
-  if (window.__tbInjected) return;
-  window.__tbInjected = true;
-
-  // 与 QuickFillStore.BLACKLIST 对应:页面自动加载/不可改的字段不填充
-  var SKIP = {${QuickFillStore.BLACKLIST.joinToString(", ") { "\"$it\": 1" }}};
-
-  // ---- 根治弹窗卡死:vant 弹窗每渲染一个格子都调 MOB_UTIL.getI18nCookie,
-  // 它经 wengine 存根引用读取 cookie → 每次都发同步网络请求(一次弹窗上千个)。
-  // 给 getI18nCookie 加永久缓存: locale 不会变,同名只真正读一次。
-  var mobPatched = false;
-  function patchMobUtil() {
-    if (mobPatched) return;
-    var mu = window.MOB_UTIL;
-    if (!mu || typeof mu.getI18nCookie !== 'function') return;
-    var orig = mu.getI18nCookie;
-    var cache = {};
-    mu.getI18nCookie = function (name) {
-      if (!(name in cache)) cache[name] = orig.call(this, name);
-      return cache[name];
-    };
-    mobPatched = true;
-  }
-  patchMobUtil();
-
-  // ---- 兜底:WebVPN 还会把 document.cookie 的每次读取变成同步网络请求,
-  // 给 cookie getter 加 100ms 读缓存(wengine 用存根引用时拦不住,主要靠上面的补丁)。
-  (function wrapCookie() {
-    try {
-      var d = Object.getOwnPropertyDescriptor(document, 'cookie');
-      if (!d && window.Document) d = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
-      if (!d && window.HTMLDocument) d = Object.getOwnPropertyDescriptor(HTMLDocument.prototype, 'cookie');
-      if (!d || !d.get || d.configurable === false) return;
-      var cached = null;
-      var ts = 0;
-      Object.defineProperty(document, 'cookie', {
-        configurable: true,
-        enumerable: d.enumerable,
-        get: function () {
-          var now = Date.now();
-          if (cached !== null && now - ts < 100) return cached;
-          cached = d.get.call(document);
-          ts = now;
-          return cached;
-        },
-        set: function (v) {
-          cached = null;
-          ts = 0;
-          d.set.call(document, v);
-        },
-      });
-    } catch (e) {}
-  })();
-
-  function eachVm(root, fn) {
-    var stack = [root];
-    var n = 0;
-    while (stack.length && n < 5000) {
-      var v = stack.pop(); n++;
-      if (!v) continue;
-      try { fn(v); } catch (e) {}
-      var ch = v.${'$'}children || [];
-      for (var i = 0; i < ch.length; i++) stack.push(ch[i]);
-    }
-  }
-
-  function findVm(pred) {
-    var roots = [];
-    var ids = ['selectrole', 'app'];
-    for (var i = 0; i < ids.length; i++) {
-      var el = document.getElementById(ids[i]);
-      if (el && el.__vue__) roots.push(el.__vue__);
-    }
-    if (!roots.length) {
-      var any = document.querySelector('div');
-      var v = any && any.__vue__;
-      while (v && v.${'$'}parent) v = v.${'$'}parent;
-      if (v) roots.push(v);
-    }
-    var found = null;
-    for (var j = 0; j < roots.length && !found; j++) {
-      eachVm(roots[j], function (vm) { if (!found && pred(vm)) found = vm; });
-    }
-    return found;
-  }
-
-  // ---- 承诺书：每个 tick 都强制清零倒计时 + 勾选 + 启用按钮 ----
-  // 页面里可能存在多个带 times/sfty 的 vm(keep-alive 缓存等),必须全部 patch;
-  // 按钮的禁用态绑定的是 buttonDisabled,不是 times,必须直接置 false
-  function tickCn(hash) {
-    if (hash.indexOf('/qjcn') < 0) return;
-    var roots = [];
-    var ids = ['selectrole', 'app'];
-    for (var i = 0; i < ids.length; i++) {
-      var el = document.getElementById(ids[i]);
-      if (el && el.__vue__) roots.push(el.__vue__);
-    }
-    for (var j = 0; j < roots.length; j++) {
-      eachVm(roots[j], function (vm) {
-        if (typeof vm.times === 'number' && typeof vm.sfty === 'boolean') {
-          if (vm.timer) { try { clearInterval(vm.timer); } catch (e) {} vm.timer = undefined; }
-          vm.times = 0;
-          vm.sfty = true;
-          if ('buttonDisabled' in vm) vm.buttonDisabled = false;
-        }
-      });
-    }
-  }
-
-  // ---- 表单：缓存组件引用，值经桥存到原生 ----
-  var formVmCache = null;
-  function formVm() {
-    if (formVmCache && !formVmCache._isDestroyed && formVmCache.formValue) return formVmCache;
-    formVmCache = findVm(function (v) {
-      return v.formValue && typeof v.submitApply === 'function';
-    });
-    return formVmCache;
-  }
-
-  // ---- 快速填充:普通字段直接写 formValue;弹窗选择类字段通过真实 UI 回放 ----
-  // (xg-select/xg-tree 有内部状态,直接 set formValue 不生效;回放走真实选中逻辑)
-  var REPLAY_SKIP = {QJXZ:1, QJXZ_DISPLAY:1, QJLX:1, QJLX_DISPLAY:1, LXQX:1, LXQX_DISPLAY:1};
-
-  function visEl(el) {
-    if (!el) return false;
-    var cs = getComputedStyle(el);
-    return cs.display !== 'none' && cs.visibility !== 'hidden' &&
-        el.getBoundingClientRect().width > 0;
-  }
-
-  function clickLeafText(text) {
-    var all = document.querySelectorAll('span,div,li,p,label');
-    for (var i = 0; i < all.length; i++) {
-      var e = all[i];
-      if (e.children.length === 0 && (e.innerText || '').trim() === text && visEl(e)) {
-        e.click();
-        return true;
-      }
-    }
-    return false;
-  }
-
-  function clickItem(sel, text) {
-    var items = document.querySelectorAll(sel);
-    for (var i = 0; i < items.length; i++) {
-      var e = items[i];
-      var t = (e.innerText || '').trim();
-      // xg 的 cascader 选项文本是全路径(如 北京市/市辖区/大兴区),按段末级匹配
-      if (!visEl(e) || (t !== text && t.slice(-text.length - 1) !== '/' + text)) continue;
-      // van-cascader 这类组件把点击 handler 绑在内部叶子上,优先点叶子(事件向上冒泡,通用)
-      var target = e;
-      var stack = [e];
-      while (stack.length) {
-        var cur = stack.pop();
-        for (var j = 0; j < cur.children.length; j++) {
-          var c = cur.children[j];
-          if (c.children.length === 0 && (c.innerText || '').trim() === text) target = c;
-          else stack.push(c);
-        }
-      }
-      target.click();
-      return true;
-    }
-    return false;
-  }
-
-  function runTasks(tasks) {
-    if (!tasks.length) return;
-    var task = tasks.shift();
-    clickLeafText(task.cap); // 点开字段弹窗
-    var idx = 0;
-    var ticks = 0;
-    var iv = setInterval(function () {
-      ticks++;
-      var sel = task.sheet ? '.van-action-sheet__item' : '.van-cascader__option';
-      if (clickItem(sel, task.path[idx])) {
-        idx++;
-        if (idx >= task.path.length) {
-          clearInterval(iv);
-          setTimeout(function () {
-            // 树选择可能还需要在底部点「确定」收尾
-            var btns = document.querySelectorAll('.xg-tree-pop-foot *, .van-popup button, .van-popup span');
-            for (var i = 0; i < btns.length; i++) {
-              var t = (btns[i].innerText || '').trim();
-              if (visEl(btns[i]) && (t === '确定' || t === '确认')) { btns[i].click(); break; }
+        status.text = "正在连接学工系统…"
+        status.visibility = View.VISIBLE
+        Thread {
+            try {
+                val api = GradeClient(GradeClient.DEFAULT_VPN_BASE, GradeClient.LEAVE_PREFIX)
+                api.loginLeaveApi(credentials.first, credentials.second)
+                val rules = api.leavePost("MobileServiceStudentApply", "getSettingInfo")
+                val leaveTypes = api.leavePost("MobileServiceStudentApply", "getStuLeaveType")
+                val list = api.leavePost("MobileServiceStudentApply", "getStudentLeaveRecords")
+                runOnUiThread {
+                    client = api
+                    setting = rules.optJSONObject("data") ?: JSONObject()
+                    types = leaveTypes.optJSONArray("data") ?: JSONArray()
+                    records = list.optJSONArray("data") ?: JSONArray()
+                    auth.hide()
+                    status.visibility = View.GONE
+                    showList()
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    status.text = e.message ?: "连接失败"
+                    auth.show()
+                }
             }
-            runTasks(tasks);
-          }, 450);
+        }.start()
+    }
+
+    private fun refresh() {
+        request("正在刷新请假记录…", {
+            it.leavePost("MobileServiceStudentApply", "getStudentLeaveRecords")
+        }) {
+            records = it.optJSONArray("data") ?: JSONArray()
+            showList()
         }
-      } else if (ticks > 40) { // 约 14s 没找到选项,放弃该字段继续下一个
-        clearInterval(iv);
-        var ov = document.querySelector('.van-overlay');
-        if (ov) ov.click();
-        setTimeout(function () { runTasks(tasks); }, 400);
-      }
-    }, 350);
-  }
-
-  window.__tbFill = function (json) {
-    var vm = formVm();
-    if (!vm) return 'novm';
-    var saved = null;
-    try { saved = JSON.parse(json); } catch (e) {}
-    if (!saved) return 'nodata';
-    Object.keys(saved).forEach(function (k) {
-      if (SKIP[k] || REPLAY_SKIP[k]) return;
-      var val = saved[k];
-      if (val === null || val === undefined || val === '') return;
-      vm.${'$'}set(vm.formValue, k, val);
-    });
-    var tasks = [];
-    if (saved.QJXZ_DISPLAY) tasks.push({cap: '请假性质', path: [saved.QJXZ_DISPLAY], sheet: true});
-    if (saved.QJLX_DISPLAY) tasks.push({cap: '请假类型', path: [saved.QJLX_DISPLAY], sheet: true});
-    var lx = saved.LXQX_DISPLAY || saved.LXQX;
-    if (lx) tasks.push({cap: '所去地点', path: String(lx).split('/'), sheet: false});
-    runTasks(tasks);
-    return 'ok';
-  };
-
-  // 顺手删掉 WebVPN 注入的水印 div(fixed + 高 z-index + 不响应点击),
-  // 它会显著拖慢日期组件等弹窗的渲染
-  function killWatermark() {
-    var kids = document.body ? document.body.children : [];
-    for (var i = kids.length - 1; i >= 0; i--) {
-      var el = kids[i];
-      if (!el || el.tagName !== 'DIV') continue;
-      var cs = getComputedStyle(el);
-      if (cs.position === 'fixed' && cs.pointerEvents === 'none' &&
-          parseInt(cs.zIndex || '0', 10) >= 10000) {
-        el.parentNode.removeChild(el);
-      }
     }
-  }
 
-  setInterval(function () {
-    var hash = location.hash || '';
-    tickCn(hash);
-    killWatermark();
-    patchMobUtil();
-    if (window.TbQuickFill) {
-      try { window.TbQuickFill.setFormPage(hash.indexOf('/xzqjsq') >= 0); } catch (e) {}
+    private fun showList() {
+        onForm = false
+        content.removeAllViews()
+        heading("学生请假")
+        hint("申请会直接提交到学校学工系统，记录以学校返回的数据为准。")
+        button("新建请假申请", primary = true) { beginApply() }
+        button("刷新记录") { refresh() }
+        if (records.length() == 0) {
+            hint("暂无请假记录")
+        } else {
+            for (index in 0 until records.length()) {
+                val row = records.optJSONObject(index) ?: continue
+                val card = card()
+                val label = row.optString("QJLX_DISPLAY").ifEmpty { "请假申请" }
+                card.addView(text(label, 17f, true))
+                card.addView(text(
+                    "${row.optString("QJKSRQ").take(16)}  至  ${row.optString("QJJSRQ").take(16)}",
+                    13f,
+                ))
+                val state = row.optString("SHZT_DISPLAY").ifEmpty { "状态 ${row.optString("SHZT")}" }
+                card.addView(text(state, 13f))
+                val sqbh = row.optString("SQBH")
+                if (sqbh.isNotEmpty()) card.setOnClickListener { showDetail(sqbh) }
+            }
+        }
+        scroll.scrollTo(0, 0)
     }
-  }, 500);
-})();
-"""
+
+    private fun showDetail(sqbh: String) {
+        request("正在读取详情…", {
+            it.leavePost("MobileServiceStudentApply", "getStudentLeaveRecordDetails",
+                JSONObject().put("SQBH", sqbh))
+        }) { response ->
+            val info = response.optJSONObject("data") ?: JSONObject()
+            val message = listOf("QJLX_DISPLAY", "QJSY", "QJKSRQ", "QJJSRQ", "LXQX_DISPLAY", "XXDZ")
+                .mapNotNull { key -> info.optString(key).takeIf { it.isNotEmpty() } }
+                .joinToString("\n")
+            AlertDialog.Builder(this).setTitle("请假详情")
+                .setMessage(message.ifEmpty { "学校没有返回可显示的详情" })
+                .setPositiveButton("关闭", null).show()
+        }
+    }
+
+    private fun beginApply() {
+        request("正在检查申请资格并读取资料…", { api ->
+            val allowed = api.leavePost("MobileServiceStudentApply", "checkWhetherStudentCanApply")
+                .optJSONObject("data") ?: JSONObject()
+            if (!allowed.optBoolean("applicable")) {
+                throw IllegalStateException(allowed.optString("reason").ifEmpty { "当前不能申请请假" })
+            }
+            val rules = api.leavePost("MobileServiceStudentApply", "getSettingInfo")
+            val profile = api.leavePost("MobileServiceStudentApply", "getStuPhoto")
+            rules to profile
+        }) { (rules, profile) ->
+            setting = rules.optJSONObject("data") ?: JSONObject()
+            photo = profile.optJSONObject("data") ?: JSONObject()
+            agreedAt = setting.optString("CURTIME")
+            val key = "pledge_${auth.credentials(this)?.first.orEmpty()}"
+            if (setting.optString("SFSYQJCN") == "1" &&
+                !getSharedPreferences("leave_prefs", MODE_PRIVATE).getBoolean(key, false)) {
+                showPromise(key)
+            } else showForm()
+        }
+    }
+
+    private fun showPromise(preferenceKey: String) {
+        AlertDialog.Builder(this)
+            .setTitle("请假承诺书")
+            .setMessage(android.text.Html.fromHtml(
+                setting.optString("QJCN").ifEmpty { "请阅读学校请假承诺书" },
+                android.text.Html.FROM_HTML_MODE_COMPACT,
+            ))
+            .setNegativeButton("取消", null)
+            .setPositiveButton("同意并记住") { _, _ ->
+                getSharedPreferences("leave_prefs", MODE_PRIVATE)
+                    .edit().putBoolean(preferenceKey, true).apply()
+                showForm()
+            }
+            .show()
+    }
+
+    private fun showForm() {
+        onForm = true
+        startAt = null
+        endAt = null
+        injuryCertificate = ""
+        chosenImages.clear()
+        val saved = QuickFillStore.loadMap(this)
+        content.removeAllViews()
+        missingHint = null
+        settingsButton = null
+        heading("新建请假")
+        hint("常用联系人与偏好从设置读取。请确认本次请假的类型、时间和去向。")
+        button("‹ 返回记录") { showList() }
+
+        val contactKeys = listOf("JJLXR", "LXDH", "SJH", "DZ_LXRGX", "DZ_SSL", "DZ_FJH", "DZ_LXDH")
+        val missing = contactKeys.filter { saved[it].isNullOrBlank() && photo.optString(it).isBlank() }
+        if (missing.isNotEmpty()) {
+            missingHint = hint("常用联系人信息尚未填全。请先到设置页填写，保存后返回这里。")
+            settingsButton = button("打开设置") { startActivity(Intent(this, SettingsActivity::class.java)) }
+        }
+
+        val available = (0 until types.length()).mapNotNull { types.optJSONObject(it) }
+        selectedType = available.firstOrNull { it.optString("LXMC") == "私事" } ?: JSONObject()
+        typeButton = button("请假类型：${selectedType.optString("LXMC").ifEmpty { "请选择" }}") {
+            val options = (0 until types.length()).mapNotNull { types.optJSONObject(it) }
+            AlertDialog.Builder(this).setTitle("请假类型")
+                .setItems(options.map { it.optString("LXMC") }.toTypedArray()) { _, which ->
+                    selectedType = options[which]
+                    typeButton.text = "请假类型：${selectedType.optString("LXMC")}"
+                    startAt = null
+                    endAt = null
+                    updateTimeButtons()
+                    updateInjurySection()
+                }.show()
+        }
+        startButton = button("开始时间：请选择") { pickTime(true) }
+        endButton = button("结束时间：请选择") { pickTime(false) }
+        reasonInput = input("请假事由 *", saved["QJSY"].orEmpty(), true)
+        selectedRegion = saved["LXQX_DISPLAY"].orEmpty()
+        content.addView(text("所去地区 *", 14f, true))
+        regionButton = button("") {
+            RegionPicker.show(this) {
+                selectedRegion = it
+                updateRegionButton()
+            }
+        }
+        updateRegionButton()
+        addressInput = input("具体地点 *", saved["XXDZ"].orEmpty())
+        leaveBeijing = switch("离京", saved["DZ_SFLJ"] == "1")
+        overnight = switch("隔夜", saved["DZ_SFGYJ"] == "1")
+        injurySection = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        injurySection.addView(text("伤病补充信息", 14f, true))
+        injuryCertificateButton = MaterialButton(this).apply {
+            isAllCaps = false
+            text = "校医院转诊证明：请选择"
+            setOnClickListener {
+                AlertDialog.Builder(this@LeaveActivity).setTitle("是否由校医院开具转诊证明")
+                    .setItems(arrayOf("是", "否")) { _, which ->
+                        injuryCertificate = if (which == 0) "1" else "0"
+                        text = "校医院转诊证明：${if (which == 0) "是" else "否"}"
+                    }.show()
+            }
+        }
+        injurySection.addView(injuryCertificateButton)
+        injurySection.addView(text("转诊证明说明或未开具原因 *", 14f, true))
+        injuryReasonInput = EditText(this).apply { minLines = 2 }
+        injurySection.addView(injuryReasonInput)
+        content.addView(injurySection)
+        updateInjurySection()
+        offCampus = switch("离开学校所在地", true)
+        remarkInput = input("备注", saved["DZ_BZ"].orEmpty(), true)
+        button("添加备注图片（最多 3 张）") { imagePicker.launch(arrayOf("image/*")) }
+        imagesHint = hint("未添加图片")
+        clearImagesButton = button("清除已选图片") {
+            chosenImages.clear()
+            updateImages()
+        }
+        updateImages()
+        submitButton = button("提交请假申请", primary = true) { submit() }
+        scroll.scrollTo(0, 0)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!onForm || !::reasonInput.isInitialized) return
+        val saved = QuickFillStore.loadMap(this)
+        if (reasonInput.text.isBlank()) reasonInput.setText(saved["QJSY"].orEmpty())
+        if (selectedRegion.isBlank()) {
+            selectedRegion = saved["LXQX_DISPLAY"].orEmpty()
+            updateRegionButton()
+        }
+        if (addressInput.text.isBlank()) addressInput.setText(saved["XXDZ"].orEmpty())
+        val required = listOf("JJLXR", "LXDH", "SJH", "DZ_LXRGX", "DZ_SSL", "DZ_FJH", "DZ_LXDH")
+        val complete = required.all { !saved[it].isNullOrBlank() || photo.optString(it).isNotBlank() }
+        if (complete) {
+            missingHint?.visibility = View.GONE
+            settingsButton?.visibility = View.GONE
+        }
+    }
+
+    private fun pickTime(start: Boolean) {
+        val calendar = Calendar.getInstance()
+        val initial = if (start) startAt else endAt
+        if (initial != null) {
+            calendar.set(initial.year, initial.monthValue - 1, initial.dayOfMonth,
+                initial.hour, initial.minute)
+        }
+        DatePickerDialog(this, { _, year, month, day ->
+            TimePickerDialog(this, { _, hour, minute ->
+                val value = LocalDateTime.of(year, month + 1, day, hour, minute)
+                if (start) startAt = value else endAt = value
+                updateTimeButtons()
+            }, calendar.get(Calendar.HOUR_OF_DAY), calendar.get(Calendar.MINUTE), true).show()
+        }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH), calendar.get(Calendar.DAY_OF_MONTH)).show()
+    }
+
+    private fun updateTimeButtons() {
+        startButton.text = "开始时间：${startAt?.format(timeFormat)?.take(16) ?: "请选择"}"
+        endButton.text = "结束时间：${endAt?.format(timeFormat)?.take(16) ?: "请选择"}"
+    }
+
+    private fun updateRegionButton() {
+        regionButton.text = "所去地区：${selectedRegion.ifEmpty { "请选择省、市、区" }}"
+    }
+
+    private fun updateInjurySection() {
+        injurySection.visibility = if (selectedType.optString("LXDM") ==
+            "354420380c6c4ceea05ebd214e194dae") View.VISIBLE else View.GONE
+    }
+
+    private fun updateImages() {
+        imagesHint.text = if (chosenImages.isEmpty()) "未添加图片" else "已选择 ${chosenImages.size} 张图片"
+        clearImagesButton.visibility = if (chosenImages.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    private data class Draft(
+        val start: LocalDateTime,
+        val end: LocalDateTime,
+        val reason: String,
+        val region: String,
+        val address: String,
+        val remark: String,
+        val leaveBeijing: Boolean,
+        val overnight: Boolean,
+        val offCampus: Boolean,
+        val type: JSONObject,
+        val saved: Map<String, String>,
+        val images: List<Uri>,
+        val injuryCertificate: String,
+        val injuryReason: String,
+    )
+
+    private fun collectDraft(): Draft {
+        val start = startAt ?: throw IllegalArgumentException("请选择开始时间")
+        val end = endAt ?: throw IllegalArgumentException("请选择结束时间")
+        if (!end.isAfter(start)) throw IllegalArgumentException("结束时间必须晚于开始时间")
+        val type = selectedType
+        if (type.optString("LXDM").isEmpty()) throw IllegalArgumentException("请选择有效的请假类型")
+        if (type.optString("QJSJLX", "2") != "2") {
+            throw IllegalArgumentException("此类型采用按天选取，请先在学校官方页面申请")
+        }
+        if (type.optString("SFSCCL") == "1" && chosenImages.isEmpty())
+            throw IllegalArgumentException("此类型要求上传证明材料，请添加图片")
+        if (type.optString("LXDM") == "354420380c6c4ceea05ebd214e194dae" &&
+            (injuryCertificate.isEmpty() || injuryReasonInput.text.isBlank())) {
+            throw IllegalArgumentException("请补全伤病转诊证明信息")
+        }
+        val reason = reasonInput.text.toString().trim()
+        val region = selectedRegion
+        val address = addressInput.text.toString().trim()
+        if (reason.isEmpty()) throw IllegalArgumentException("请填写请假事由")
+        if (region.isEmpty() || address.isEmpty()) throw IllegalArgumentException("请填写所去地区和具体地点")
+        val saved = QuickFillStore.loadMap(this)
+        val required = listOf("JJLXR", "LXDH", "SJH", "DZ_LXRGX", "DZ_SSL", "DZ_FJH", "DZ_LXDH")
+        val missing = required.filter { saved[it].isNullOrBlank() && photo.optString(it).isBlank() }
+        if (missing.isNotEmpty()) throw IllegalArgumentException("请先在设置页补全常用联系人信息")
+        val dayCount = Duration.between(start, end).toMinutes().toDouble() / 1440.0
+        if (dayCount < 0.005) throw IllegalArgumentException("请假时间过短，学校按两位小数计算天数")
+        val maximum = setting.optDouble("ZDQJTS", 100.0)
+        if (dayCount > maximum) throw IllegalArgumentException("请假天数超过学校允许的上限")
+        if (type.optString("LXDM") == "0cbf975b28f945d482f09ac1a520e914") {
+            if (!start.toLocalDate().isAfter(LocalDateTime.now().toLocalDate()) ||
+                start.toLocalDate() != end.toLocalDate() || start.hour < 5 ||
+                end.hour >= 22 && end.minute > 0 || end.hour > 22
+            ) throw IllegalArgumentException("白日假须从次日起、在同一天 05:00–22:00 内")
+        } else if (!overnight.isChecked && start.toLocalDate() != end.toLocalDate()) {
+            throw IllegalArgumentException("跨天请假请打开“隔夜”")
+        }
+        return Draft(start, end, reason, region, address,
+            remarkInput.text.toString().trim(), leaveBeijing.isChecked, overnight.isChecked,
+            offCampus.isChecked, type, saved, chosenImages.toList(), injuryCertificate,
+            injuryReasonInput.text.toString().trim())
+    }
+
+    private fun submit() {
+        if (submitting) return
+        val draft = try { collectDraft() } catch (e: IllegalArgumentException) {
+            Toast.makeText(this, e.message, Toast.LENGTH_LONG).show()
+            return
+        }
+        AlertDialog.Builder(this).setTitle("确认提交请假")
+            .setMessage("${draft.type.optString("LXMC")}\n${draft.start.format(timeFormat)} 至 ${draft.end.format(timeFormat)}\n${draft.reason}")
+            .setNegativeButton("返回修改", null)
+            .setPositiveButton("提交") { _, _ -> sendDraft(draft) }
+            .show()
+    }
+
+    private fun sendDraft(draft: Draft) {
+        if (client == null) {
+            Toast.makeText(this, "预览模式不会提交申请", Toast.LENGTH_SHORT).show()
+            return
+        }
+        submitting = true
+        submitButton.isEnabled = false
+        request("正在向学校提交，请勿重复点击…", { api ->
+            val regions = api.leaveRegions().optJSONObject("datas")?.optJSONObject("code")
+                ?.optJSONArray("rows") ?: throw IllegalStateException("无法读取学校地区代码")
+            val allRegions = (0 until regions.length()).mapNotNull { regions.optJSONObject(it) }
+            val exact = allRegions.filter { it.optString("name").trimStart('/') == draft.region }
+            // 学校码表有少数旧行省略省名；只在完整路径无匹配且后缀唯一时接受。
+            val candidates = if (exact.isNotEmpty()) exact else allRegions.filter {
+                draft.region.endsWith("/${it.optString("name").trimStart('/')}")
+            }
+            if (candidates.size != 1) throw IllegalArgumentException("所去地区无法唯一匹配学校地区代码")
+            val regionCode = candidates.single().optString("id")
+
+            val params = JSONObject(photo.toString())
+            for ((key, value) in draft.saved) {
+                if (key !in QuickFillStore.BLACKLIST && !key.endsWith("_DISPLAY")) params.put(key, value)
+            }
+            val days = BigDecimal(Duration.between(draft.start, draft.end).toMinutes())
+                .divide(BigDecimal(1440), 2, RoundingMode.HALF_UP)
+            params.put("QJLX", draft.type.optString("LXDM"))
+            params.put("QJLX_DISPLAY", draft.type.optString("LXMC"))
+            params.put("QJSJLX", "2")
+            val nature = if (draft.saved["QJXZ_DISPLAY"] == "因公请假") "因公请假" else "因私请假"
+            params.put("QJXZ", if (nature == "因公请假") "2" else "1")
+            params.put("QJXZ_DISPLAY", nature)
+            params.put("QJSY", draft.reason)
+            params.put("QJKSRQ", draft.start.format(timeFormat))
+            params.put("QJJSRQ", draft.end.format(timeFormat))
+            params.put("QJTS", days.toPlainString())
+            params.put("LXQX", regionCode)
+            params.put("LXQX_DISPLAY", draft.region)
+            params.put("XXDZ", draft.address)
+            params.put("DZ_BZ", draft.remark)
+            params.put("DZ_SFLJ", if (draft.leaveBeijing) "1" else "0")
+            params.put("DZ_SFGYJ", if (draft.overnight) "1" else "0")
+            params.put("DZ_ZZZM", if (draft.type.optString("LXDM") ==
+                "354420380c6c4ceea05ebd214e194dae") draft.injuryCertificate else "")
+            params.put("DZ_ZZZM_YY", if (draft.type.optString("LXDM") ==
+                "354420380c6c4ceea05ebd214e194dae") draft.injuryReason else "")
+            params.put("SFLKSZD", if (draft.offCampus) "1" else "0")
+            // 学校新建表单把“离校假”锁定为 1，旧快速填充设置中的 0 不应覆盖它。
+            params.put("SFLX", "1")
+            params.put("SJH", draft.saved["SJH"] ?: params.optString("SJH"))
+            params.put("SFYDCNS", if (setting.optString("SFSYQJCN") == "1") "1" else "0")
+            params.put("YDSJ", agreedAt)
+            if (draft.images.isNotEmpty()) {
+                val chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                val random = SecureRandom()
+                val token = buildString(32) { repeat(32) { append(chars[random.nextInt(chars.length)]) } }
+                for (uri in draft.images) api.leaveUploadImage(this, uri, token)
+                params.put("ZMCL", token)
+            }
+            api.leavePost("MobileServiceStudentApply", "saveStudentLeaveRecord", params)
+        }) {
+            submitting = false
+            Toast.makeText(this, "申请已提交，正在刷新记录", Toast.LENGTH_LONG).show()
+            refresh()
+        }
+    }
+
+    private fun heading(value: String) {
+        val view = text(value, 23f, true)
+        view.setPadding(0, 0, 0, dp(10))
+        content.addView(view)
+    }
+
+    private fun hint(value: String): TextView {
+        val view = text(value, 14f)
+        view.setTextColor(0xff546e7a.toInt())
+        view.setPadding(0, dp(6), 0, dp(12))
+        content.addView(view)
+        return view
+    }
+
+    private fun text(value: String, size: Float, bold: Boolean = false) = TextView(this).apply {
+        text = value
+        textSize = size
+        setTextColor(0xff172b4d.toInt())
+        if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
+        setPadding(0, dp(4), 0, dp(4))
+    }
+
+    private fun button(value: String, primary: Boolean = false, action: () -> Unit) = MaterialButton(
+        this, null,
+        if (primary) com.google.android.material.R.attr.materialButtonStyle
+        else com.google.android.material.R.attr.materialButtonOutlinedStyle,
+    ).apply {
+        text = value
+        isAllCaps = false
+        setOnClickListener { action() }
+        content.addView(this, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+    }
+
+    private fun input(label: String, value: String, multiline: Boolean = false): EditText {
+        content.addView(text(label, 14f, true))
+        return EditText(this).apply {
+            setText(value)
+            textSize = 16f
+            if (multiline) {
+                minLines = 2
+                gravity = android.view.Gravity.TOP
+            }
+            content.addView(this, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
+        }
+    }
+
+    private fun switch(label: String, checked: Boolean) = SwitchMaterial(this).apply {
+        text = label
+        isChecked = checked
+        content.addView(this, LinearLayout.LayoutParams(-1, dp(48)))
+    }
+
+    private fun card(): LinearLayout {
+        val panel = MaterialCardView(this).apply {
+            radius = dp(12).toFloat()
+            cardElevation = dp(2).toFloat()
+        }
+        val inner = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+        }
+        panel.addView(inner)
+        content.addView(panel, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+        return inner
+    }
+
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+
+    @Deprecated("Use OnBackPressedDispatcher")
+    override fun onBackPressed() {
+        if (onForm) showList() else super.onBackPressed()
     }
 }
